@@ -1,0 +1,8 @@
+boto3
+openai
+python-dotenv
+pypdf
+pydantic
+nltk
+streamlit
+boto3-stubs[bedrock-runtime,s3vectors]
