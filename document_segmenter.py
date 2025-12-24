@@ -266,10 +266,10 @@ class TitanEmbeddingGenerator:
         __EMBEDDING_MODEL_ID: Bedrock model ID for generating embeddings.
     """
 
-    __REGION_NAME: str = "eu-north-1"
-    __BUCKET_NAME: str = "aip-c01-s3-vectors-kb-base"
-    __VECTOR_INDEX_NAME: str = "intelligent-agents-study-material"
-    __EMBEDDING_MODEL_ID: str = "amazon.titan-embed-text-v2:0"
+    __REGION_NAME: str = ""
+    __BUCKET_NAME: str = ""
+    __VECTOR_INDEX_NAME: str = ""
+    __EMBEDDING_MODEL_ID: str = ""
 
 
     @property
