@@ -8,7 +8,7 @@ This project implements a sophisticated document chunking system that mimics AWS
 
 ## Architecture
 
-The system consists of four main components:
+The system consists of multiple components with support for both OpenAI and Ollama backends:
 
 ### 1. **OpenAIConfig** - Configuration Management
 - Manages OpenAI API credentials and model settings
@@ -17,7 +17,14 @@ The system consists of four main components:
   - `OPENAI_API_KEY`: OpenAI API authentication key
   - `MODEL_ID`: OpenAI model identifier for semantic analysis
 
-### 2. **DocumentSegmenter** - Semantic Chunking Engine
+### 2. **OllamaAIConfig** - Ollama Configuration Management
+- Manages Ollama model settings
+- Loads configuration from environment variables
+- Required environment variables:
+  - `OLLAMA_MODEL_ID`: Ollama model identifier (e.g., "llama3.2", "phi4")
+  - `OLLAMA_BASE_URL` (optional): Custom Ollama server URL
+
+### 3. **DocumentSegmenter** - Semantic Chunking Engine (OpenAI)
 - **Core Functionality**: Identifies semantic chunk boundaries in document text
 - **Technology**: Uses OpenAI's structured output API with custom system prompts
 - **Algorithm**:
@@ -30,7 +37,17 @@ The system consists of four main components:
   - List of sentence indices where new chunks should begin
   - Explanatory notes for each breakpoint decision
 
-### 3. **PdfChunker** - PDF Processing Pipeline
+### 4. **OllamaDocumentSegmenter** - Semantic Chunking Engine (Ollama)
+- **Core Functionality**: Provides the same semantic chunking as DocumentSegmenter but using Ollama
+- **Technology**: Extends `AICore` base class with Ollama chat API
+- **Advantages**:
+  - Works with local Ollama models
+  - No API costs
+  - Privacy-preserving (runs locally)
+  - Supports various open-source models
+- **Output**: Returns `Breakpoints` with JSON parsing from chat responses
+
+### 5. **PdfChunker** - PDF Processing Pipeline (OpenAI)
 - **Workflow**:
   1. Extracts text from PDF files using `pypdf.PdfReader`
   2. Splits extracted text into sentences using NLTK's sentence tokenizer
@@ -42,7 +59,12 @@ The system consists of four main components:
   - Breakpoint validation and sanitization
   - Empty chunk prevention
 
-### 4. **TitanEmbeddingGenerator** - Vector Embedding & Storage
+### 6. **OllamaPdfChunker** - PDF Processing Pipeline (Ollama)
+- **Same Functionality**: Identical to PdfChunker but uses `OllamaDocumentSegmenter`
+- **Use Case**: For users who prefer local Ollama models over OpenAI
+- **Implementation**: Uses the same extraction and tokenization logic
+
+### 7. **TitanEmbeddingGenerator** - Vector Embedding & Storage
 - **Purpose**: Generates vector embeddings and stores them in AWS S3 Vectors
 - **Technology Stack**:
   - AWS Bedrock Runtime: Invokes Titan Embed Text V2 model
@@ -60,7 +82,7 @@ The system consists of four main components:
      - Character length and word count
   3. Stores vectors in S3 Vectors for similarity search
 
-### 5. **Streamlit Web Application** (`app.py`)
+### 8. **Streamlit Web Application** (`app.py`)
 - **User Interface**: Interactive web app for document processing
 - **Features**:
   - PDF file upload
@@ -105,15 +127,55 @@ pydantic                          # Data validation
 nltk                              # Natural language processing
 streamlit                         # Web application framework
 boto3-stubs[bedrock-runtime,s3vectors]  # Type hints for boto3
+ollama                            # Ollama Python client for local LLMs
 ```
 
 ## Configuration Requirements
 
 ### Environment Variables
 Create a `.env` file with:
+
+**For OpenAI Backend:**
 ```
 OPENAI_API_KEY=your_openai_api_key
 MODEL_ID=your_openai_model_id
+```
+
+**For Ollama Backend:**
+```
+OLLAMA_MODEL_ID=llama3.2
+OLLAMA_BASE_URL=http://localhost:11434  # Optional, defaults to standard Ollama URL
+```
+
+### Choosing Between OpenAI and Ollama
+
+**Use OpenAI (DocumentSegmenter/PdfChunker) when:**
+- You need the highest quality semantic analysis
+- API costs are acceptable
+- You prefer managed cloud services
+
+**Use Ollama (OllamaDocumentSegmenter/OllamaPdfChunker) when:**
+- You want to run models locally
+- You need privacy/data security
+- You want to avoid API costs
+- You have sufficient local compute resources
+
+### Usage Example
+
+**With OpenAI:**
+```python
+from document_segmenter import PdfChunker
+
+chunker = PdfChunker()
+chunks = chunker.chunk_pdf("document.pdf")
+```
+
+**With Ollama:**
+```python
+from document_segmenter import OllamaPdfChunker
+
+chunker = OllamaPdfChunker()
+chunks = chunker.chunk_pdf("document.pdf")
 ```
 
 ### AWS Configuration

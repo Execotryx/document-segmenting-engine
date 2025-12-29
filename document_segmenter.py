@@ -5,6 +5,10 @@ from os import getenv
 from pypdf import PdfReader
 from pydantic import BaseModel
 import nltk  # type: ignore
+from ollama import ChatResponse
+from ollama_ai_core import AICore
+from ollama_ai_config import OllamaAIConfig
+import json
 
 #region OpenAIConfig class - configuration for OpenAI API
 
@@ -151,6 +155,107 @@ class DocumentSegmenter:
 #endregion
 
 
+#region OllamaDocumentSegmenter class - handles document segmentation using Ollama LLM, to imitate the semantic chunking
+
+class OllamaDocumentSegmenter(AICore[Breakpoints]):
+    """Handles document segmentation using Ollama LLM for semantic chunking.
+    
+    Implements semantic chunk boundary detection using Ollama models.
+    Extends AICore to provide structured breakpoint detection from chat responses.
+    """
+
+    def __init__(self) -> None:
+        """Initialize Ollama document segmenter with configuration and system prompt."""
+        config: OllamaAIConfig = OllamaAIConfig()
+        system_prompt: str = (
+            "You are a Document Segmentation Engine implementing semantic chunk boundary detection.\n\n"
+            "Your task is to identify where new retrieval chunks should begin.\n"
+            "You DO NOT output the chunks themselves - only the sentence indices where a new chunk starts.\n\n"
+            "### CORE LOGIC\n\n"
+            "1. Semantic Continuity\n"
+            "- Read the document sentence by sentence.\n"
+            "- Maintain a running notion of the current topic or line of reasoning.\n"
+            "- As long as new sentences extend or elaborate the same idea, keep them in the same chunk.\n\n"
+            "2. Topic Shift Detection\n"
+            "Insert a breakpoint when there is a clear semantic transition, such as:\n"
+            "- A new section or heading\n"
+            "- A change in subject, goal, or reasoning\n"
+            "- Discourse markers like 'Moving on', 'In contrast', 'Chapter 2'\n"
+            "High cohesion markers ('Therefore', 'Additionally') indicate continuation.\n\n"
+            "3. Size Awareness (Approximate)\n"
+            "- Target chunk size: ~200-450 tokens (approximate).\n"
+            "- If a chunk is clearly becoming too large, prefer inserting a breakpoint at the nearest logical pause (sentence boundary, paragraph break, or section boundary).\n"
+            "- Avoid creating chunks smaller than ~50 tokens unless the content is a standalone header, title, or isolated fact.\n\n"
+            "NOTE:\n"
+            "You are NOT required to compute exact token counts.\n"
+            "Final size enforcement will be handled by downstream processing.\n\n"
+            "### STRUCTURAL CONSTRAINTS\n\n"
+            "- Never place a breakpoint inside:\n"
+            "  - Code blocks (``` ... ```)\n"
+            "  - Markdown tables\n"
+            "  Treat these as indivisible semantic units.\n\n"
+            "### OUTPUT FORMAT\n\n"
+            "Return strictly valid JSON only.\n\n"
+            "{\n"
+            "  \"breakpoints\": [5, 12, 28],\n"
+            "  \"notes\": [\n"
+            "    \"Sentence 5 begins a new authentication topic.\",\n"
+            "    \"Sentence 12 introduces a new section header.\"\n"
+            "  ]\n"
+            "}"
+        )
+        super().__init__(system_behavior=system_prompt, config=config)
+
+    def determine_breakpoints(self, sentences: list[str]) -> Breakpoints:
+        """Analyze sentences and determine where semantic chunk boundaries should be placed.
+        
+        Args:
+            sentences: List of sentences to analyze for breakpoint placement.
+            
+        Returns:
+            Breakpoints object containing indices and explanatory notes.
+            
+        Raises:
+            RuntimeError: If Ollama API call fails or response cannot be parsed.
+        """
+        try:
+            input_text: str = "\n".join([f"[{i}] {sentence}" for i, sentence in enumerate(sentences)])
+            return self.ask(input_text)
+        except Exception as e:
+            raise RuntimeError(f"Failed to determine breakpoints using Ollama: {e}") from e
+
+    def _process_response(self, response: ChatResponse) -> Breakpoints:
+        """Process the chat response and extract breakpoints.
+        
+        Args:
+            response: Chat response from Ollama.
+            
+        Returns:
+            Breakpoints object parsed from response.
+            
+        Raises:
+            ValueError: If response cannot be parsed into Breakpoints.
+        """
+        try:
+            content: str = response.message.content if response.message.content else ""
+            
+            # Extract JSON from response (handle markdown code blocks)
+            json_str: str = content.strip()
+            if json_str.startswith("```"):
+                # Remove markdown code block markers
+                lines = json_str.split("\n")
+                json_str = "\n".join(lines[1:-1]) if len(lines) > 2 else json_str
+            
+            # Parse JSON and validate with Pydantic
+            data = json.loads(json_str)
+            return Breakpoints(**data)
+        except (json.JSONDecodeError, ValueError) as e:
+            raise ValueError(f"Failed to parse breakpoints from Ollama response: {e}") from e
+
+
+#endregion
+
+
 #region PdfChunker class - placeholder for PDF chunking logic to execute the chunking process using OpenAI LLM
 
 class PdfChunker:
@@ -239,6 +344,136 @@ class PdfChunker:
             chunks.append(chunk)
             
         return chunks
+
+#endregion
+
+
+#region OllamaPdfChunker class - handles PDF chunking using Ollama-based semantic segmentation
+
+class OllamaPdfChunker:
+    """Handles PDF document chunking using Ollama-based semantic segmentation.
+    
+    Extracts text from PDF files, splits into sentences, determines semantic breakpoints
+    using Ollama, and generates text chunks suitable for retrieval-augmented generation (RAG) systems.
+    """
+
+    @property
+    def _segmenter(self) -> OllamaDocumentSegmenter:
+        """Get the Ollama document segmenter."""
+        return self.__segmenter
+
+    def __init__(self) -> None:
+        """Initialize with Ollama document segmenter."""
+        self.__segmenter: OllamaDocumentSegmenter = OllamaDocumentSegmenter()
+
+    def chunk_pdf(self, pdf_path: str) -> list[str]:
+        """Process a PDF file and split it into semantic chunks.
+        
+        Args:
+            pdf_path: Path to the PDF file to process.
+            
+        Returns:
+            List of text chunks, each representing a semantically cohesive unit.
+            
+        Raises:
+            FileNotFoundError: If PDF file does not exist.
+            RuntimeError: If PDF extraction or chunking fails.
+        """
+        pdf_raw_text: str = self.__extract_text_from_pdf(pdf_path)
+        sentences: list[str] = self.__split_text_into_sentences(pdf_raw_text)
+        breakpoints = self.__determine_breakpoints(sentences)
+        return self.__apply_breakpoints_to_sentences(sentences, breakpoints)
+
+    def __extract_text_from_pdf(self, pdf_path: str) -> str:
+        """Extract text content from PDF file.
+        
+        Args:
+            pdf_path: Path to PDF file.
+            
+        Returns:
+            Extracted text content.
+            
+        Raises:
+            FileNotFoundError: If PDF file not found.
+            RuntimeError: If extraction fails.
+        """
+        try:
+            with open(pdf_path, "rb") as file:
+                reader: PdfReader = PdfReader(file)
+                text: str = ""
+                for page in reader.pages:
+                    text += f"{page.extract_text()}\n"
+            return text
+        except FileNotFoundError:
+            raise FileNotFoundError(f"PDF file not found: {pdf_path}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to extract text from PDF: {e}") from e
+
+    def __split_text_into_sentences(self, text: str) -> list[str]:
+        """Split text into sentences using NLTK's sentence tokenizer.
+        
+        Args:
+            text: Text to split.
+            
+        Returns:
+            List of sentences.
+        """
+        try:
+            return nltk.sent_tokenize(text)
+        except LookupError:
+            # Download punkt tokenizer if not already present
+            nltk.download('punkt', quiet=True)
+            nltk.download('punkt_tab', quiet=True)
+            return nltk.sent_tokenize(text)
+
+    def __determine_breakpoints(self, sentences: list[str]) -> Breakpoints:
+        """Determine semantic breakpoints using Ollama segmenter.
+        
+        Args:
+            sentences: List of sentences to analyze.
+            
+        Returns:
+            Breakpoints object with indices and notes.
+        """
+        return self._segmenter.determine_breakpoints(sentences)
+
+    def __apply_breakpoints_to_sentences(self, sentences: list[str], breakpoints: Breakpoints) -> list[str]:
+        """Apply breakpoints to create text chunks.
+        
+        Args:
+            sentences: List of sentences.
+            breakpoints: Breakpoints object with chunk boundaries.
+            
+        Returns:
+            List of text chunks.
+        """
+        # Validate and sanitize breakpoints
+        valid_breakpoints = sorted(set(
+            bp for bp in breakpoints.breakpoints 
+            if 0 < bp < len(sentences)
+        ))
+        
+        # If no valid breakpoints, return all text as one chunk
+        if not valid_breakpoints:
+            return [' '.join(sentences)]
+        
+        chunks: list[str] = []
+        start_idx: int = 0
+        
+        for breakpoint in valid_breakpoints:
+            # Skip if breakpoint equals start_idx (would create empty chunk)
+            if breakpoint > start_idx:
+                chunk: str = ' '.join(sentences[start_idx:breakpoint])
+                chunks.append(chunk)
+                start_idx = breakpoint
+        
+        # Add the remaining sentences as the last chunk
+        if start_idx < len(sentences):
+            chunk: str = ' '.join(sentences[start_idx:])
+            chunks.append(chunk)
+            
+        return chunks
+
 
 #endregion
 
